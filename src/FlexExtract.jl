@@ -8,6 +8,7 @@ using Pkg.Artifacts
 using PyCall
 import EcRequests
 using EcRequests: EcRequestType
+using StatsBase
 
 export 
     FlexExtractDir,
@@ -16,6 +17,7 @@ export
     set_area!,
     set_area,
     set_steps!,
+    set_ensemble_rest!,
     save_request,
     csvpath,
     submit,
@@ -30,6 +32,7 @@ const ROOT_ARTIFACT_FLEXEXTRACT = artifact"flex_extract"
 const PATH_FLEXEXTRACT = joinpath(ROOT_ARTIFACT_FLEXEXTRACT, "flex_extract_v7.1.2")
 
 const FLEX_DEFAULT_CONTROL = "CONTROL_OD.OPER.FC.eta.highres"
+const FLEX_ENSEMBLE_CONTROL = "CONTROL_OD.ENFO.PF.36hours"
 const PATH_FLEXEXTRACT_CONTROL_DIR = joinpath(PATH_FLEXEXTRACT, "Run", "Control")
 const PATH_FLEXEXTRACT_DEFAULT_CONTROL = joinpath(PATH_FLEXEXTRACT_CONTROL_DIR, FLEX_DEFAULT_CONTROL)
 
@@ -47,7 +50,7 @@ _default_control(filename) = joinpath(PATH_FLEXEXTRACT_CONTROL_DIR, filename)
 
 function __init__()
     pyimport_conda("ecmwfapi", "ecmwf-api-client", "conda-forge")
-    pyimport_conda("eccodes", "eccodes", "conda-forge")
+    pyimport_conda("eccodes", "python-eccodes", "conda-forge")
     pyimport_conda("genshi", "genshi", "conda-forge")
     pyimport_conda("numpy", "numpy", "conda-forge")
     pyimport_conda("cdsapi", "cdsapi", "conda-forge")
@@ -357,6 +360,18 @@ function set_steps!(fcontrol::FeControl, startdate, enddate, timestep)
             push!(type_ctrl, "AN")
             push!(step_ctrl, 0 |> format_opt)
         end
+    elseif occursin("ENFO", fcontrol[:STREAM])
+        fc_startdate = enddate - Dates.Hour(36)
+        fc_startdate = Dates.floorceil(fc_startdate, Dates.Hour(12))[2]
+        for st in stepdt
+            push!(time_ctrl, Dates.hour(fc_startdate) |> format_opt)
+            push!(type_ctrl, "PF")
+            step = Dates.Hour(st - fc_startdate).value
+            push!(step_ctrl, step |> format_opt)
+        end
+        startdate = fc_startdate
+        enddate = startdate
+        merge!(fcontrol, Dict(:ACCTIME => time_ctrl[1]))
     else
         for st in stepdt
             push!(time_ctrl, div(Dates.Hour(st).value, 12) * 12 |> format_opt)
@@ -366,15 +381,40 @@ function set_steps!(fcontrol::FeControl, startdate, enddate, timestep)
         end
     end
 
-    newd = Dict(
-        :START_DATE => Dates.format(startdate, "yyyymmdd"), 
-        :TYPE => join(type_ctrl, " "),
-        :TIME => join(time_ctrl, " "), 
-        :STEP => join(step_ctrl, " "), 
-        :DTIME => timestep isa String || string(timestep),
-    )
+    if Dates.Date(startdate) == Dates.Date(enddate)
+        newd = Dict(
+            :START_DATE => Dates.format(startdate, "yyyymmdd"), 
+            :TYPE => join(type_ctrl, " "),
+            :TIME => join(time_ctrl, " "), 
+            :STEP => join(step_ctrl, " "), 
+            :DTIME => timestep isa String || string(timestep),
+        )
+    else
+        newd = Dict(
+            :START_DATE => Dates.format(startdate, "yyyymmdd"), 
+            :END_DATE => Dates.format(enddate, "yyyymmdd"), 
+            :TYPE => join(type_ctrl, " "),
+            :TIME => join(time_ctrl, " "), 
+            :STEP => join(step_ctrl, " "), 
+            :DTIME => timestep isa String || string(timestep),
+        )
+    end
+
     merge!(fcontrol, newd)
 end
 set_steps!(fedir::FlexExtractDir, startdate, enddate, timestep) = set_steps!(fedir.control, startdate, enddate, timestep)
+
+function set_ensemble_rest!(fcontrol::FeControl)
+    members = sample(1:50, 9; replace=false)
+    new = Dict(
+        :NUMBER => join(members, "/"),
+        :LEVELIST => "1/to/137",
+        :RESOL => 799,
+        :FORMAT => "GRIB2",
+        :GAUSS => 0,
+    )
+    merge!(fcontrol, new)
+end
+set_ensemble_rest!(fedir::FlexExtractDir) = set_ensemble_rest!(FeControl(fedir))
 
 end
